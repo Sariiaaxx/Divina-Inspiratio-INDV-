@@ -1,6 +1,8 @@
 """Vista de inicio de sesión y registro (Actualizado para Flet 1.0+)."""
 import flet as ft
 
+from vista.componentes_vista import notificar
+
 BG = "#101117"
 BG_CIRCULO = "#161b2b"
 TARJETA = "#1b1e2a"
@@ -32,6 +34,13 @@ class LoginVista:
         self.correo = campo("nombre@ejemplo.com")
         self.password = campo("••••••••••", password=True)
         self.confirmar = campo("Repite la contraseña", password=True)
+        self.codigo = campo("Código de invitación (p. ej. PRO-XXXX-XXXX)")
+        self.rol = ft.RadioGroup(
+            value="vecino", on_change=self._rol_cambiado,
+            content=ft.Row([ft.Radio(value="vecino", label="Vecino"),
+                            ft.Radio(value="propietario", label="Propietario"),
+                            ft.Radio(value="autoridad", label="Autoridad")],
+                           wrap=True, spacing=8))
 
         self.titulo = ft.Text(size=26, weight=ft.FontWeight.BOLD, color=TEXTO,
                               text_align=ft.TextAlign.CENTER)
@@ -64,6 +73,8 @@ class LoginVista:
 
         self.bloque_nombre = self._con_etiqueta("Nombre", self.nombre)
         self.bloque_confirmar = self._con_etiqueta("Confirmar contraseña", self.confirmar)
+        self.bloque_rol = self._con_etiqueta("Tipo de cuenta", self.rol)
+        self.bloque_codigo = self._con_etiqueta("Código de invitación", self.codigo)
         self.fila_olvido = ft.Row([self.enlace_olvido], alignment=ft.MainAxisAlignment.END)
 
         self._aplicar_modo()
@@ -97,6 +108,8 @@ class LoginVista:
                     self._con_etiqueta("Correo electrónico", self.correo),
                     self._con_etiqueta("Contraseña", self.password),
                     self.bloque_confirmar,
+                    self.bloque_rol,
+                    self.bloque_codigo,
                     self.fila_olvido,
                     self.mensaje,
                     self.boton,
@@ -138,6 +151,8 @@ class LoginVista:
 
         self.bloque_nombre.visible = not login
         self.bloque_confirmar.visible = not login
+        self.bloque_rol.visible = not login
+        self.bloque_codigo.visible = (not login) and self.rol.value != "vecino"
         self.fila_olvido.visible = login
         self._mostrar_mensaje("")
 
@@ -149,6 +164,10 @@ class LoginVista:
     def _cambiar_modo(self, e):
         self.modo = "registro" if self.modo == "login" else "login"
         self._aplicar_modo()
+        self.page.update()
+
+    def _rol_cambiado(self, e):
+        self.bloque_codigo.visible = self.rol.value != "vecino"
         self.page.update()
 
     def _olvido(self, e):
@@ -163,7 +182,9 @@ class LoginVista:
         else:
             ok, msg = self.controlador.registrar(
                 self.nombre.value or "", self.correo.value or "",
-                self.password.value or "", self.confirmar.value or "")
+                self.password.value or "", self.confirmar.value or "",
+                self.rol.value or "vecino", self.codigo.value or "")
         if not ok:
             self._mostrar_mensaje(msg)
+            notificar(self.page, msg, error=True)
             self.page.update()
