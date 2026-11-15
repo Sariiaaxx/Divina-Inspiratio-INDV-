@@ -1,72 +1,30 @@
-"""Modelo: lectura/escritura de usuarios en registros/usuarios.json."""
+"""Modelo de usuarios (registros/usuarios.json) con roles."""
 import hashlib
 import hmac
-import json
-import os
 import secrets
 from datetime import datetime
-from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parent.parent
-DIR_REGISTROS = RAIZ / "registros"
-ARCHIVO_USUARIOS = DIR_REGISTROS / "usuarios.json"
+from modelo.gestor_modelo import GestorModelo, ErrorAlmacenamiento
+
+ROLES = ("admin", "autoridad", "propietario", "vecino")
 ITERACIONES = 200_000
 
-
-class ErrorAlmacenamiento(Exception):
-    """El archivo JSON no se pudo leer o escribir."""
+# Admin Supremo preestablecido (cambia la contraseña tras el primer acceso).
+ADMIN_NOMBRE = "Admin Supremo"
+ADMIN_CORREO = "admin@divineinspiratio.com"
+ADMIN_PASSWORD = "Admin2026!"
 
 
 class UsuarioExistente(Exception):
     """Ya hay un usuario con ese correo."""
 
 
-class UsuariosModelo:
-    def __init__(self, archivo: Path = ARCHIVO_USUARIOS):
-        self.archivo = Path(archivo)
-        self._preparar_almacenamiento()
+class UsuariosModel:
+    def __init__(self, gestor: GestorModelo = None):
+        self.gestor = gestor or GestorModelo("usuarios.json")
+        self._asegurar_admin()
 
-    # ---------- almacenamiento ----------
-    def _preparar_almacenamiento(self):
-        try:
-            self.archivo.parent.mkdir(parents=True, exist_ok=True)
-            if not self.archivo.exists():
-                self._guardar([])
-        except OSError as e:
-            raise ErrorAlmacenamiento(f"No se pudo preparar 'registros/': {e}")
-
-    def _leer(self) -> list:
-        try:
-            with open(self.archivo, "r", encoding="utf-8") as f:
-                datos = json.load(f)
-            if not isinstance(datos, list):
-                raise ValueError("Estructura inesperada")
-            return datos
-        except (json.JSONDecodeError, ValueError):
-            # Archivo corrupto: se conserva una copia y se avisa.
-            copia = self.archivo.with_name(
-                f"usuarios.corrupto-{datetime.now():%Y%m%d%H%M%S}.json")
-            try:
-                os.replace(self.archivo, copia)
-            except OSError:
-                pass
-            self._guardar([])
-            raise ErrorAlmacenamiento(
-                "El archivo de usuarios estaba dañado. Se guardó una copia "
-                f"({copia.name}) y se creó uno nuevo. Vuelve a registrarte.")
-        except OSError as e:
-            raise ErrorAlmacenamiento(f"No se pudo leer usuarios.json: {e}")
-
-    def _guardar(self, usuarios: list):
-        tmp = self.archivo.with_suffix(".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(usuarios, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.archivo)  # escritura atómica
-        except OSError as e:
-            raise ErrorAlmacenamiento(f"No se pudo guardar usuarios.json: {e}")
-
-    # ---------- contraseñas ----------
+    # ---------- utilidades ----------
     @staticmethod
     def _hash(password: str, salt: str) -> str:
         return hashlib.pbkdf2_hmac(
@@ -76,35 +34,74 @@ class UsuariosModelo:
     def _normalizar(correo: str) -> str:
         return correo.strip().lower()
 
-    # ---------- operaciones ----------
-    def buscar_por_correo(self, correo: str):
-        correo = self._normalizar(correo)
-        for u in self._leer():
-            if u.get("correo") == correo:
-                return u
-        return None
-
-    def registrar(self, nombre: str, correo: str, password: str) -> dict:
-        usuarios = self._leer()
-        correo = self._normalizar(correo)
-        if any(u.get("correo") == correo for u in usuarios):
-            raise UsuarioExistente(correo)
+    def _nuevo(self, nombre, correo, password, rol) -> dict:
         salt = secrets.token_hex(16)
-        usuario = {
+        return {
             "id": secrets.token_hex(8),
             "nombre": nombre.strip(),
-            "correo": correo,
+            "correo": self._normalizar(correo),
             "salt": salt,
             "password_hash": self._hash(password, salt),
-            "rol": "Administrador" if not usuarios else "Usuario",
+            "rol": rol,
             "creado": datetime.now().isoformat(timespec="seconds"),
         }
+
+    def _asegurar_admin(self):
+        try:
+            usuarios = self.gestor.leer()
+        except ErrorAlmacenamiento:
+            usuarios = self.gestor.leer()  # tras el reinicio queda vacío
+        cambios = False
+        for u in usuarios:  # migración: roles de la Fase 1 -> vecino
+            if u.get("rol") not in ROLES:
+                u["rol"] = "vecino"
+                cambios = True
+        if not any(u.get("rol") == "admin" for u in usuarios):
+            usuarios.append(self._nuevo(ADMIN_NOMBRE, ADMIN_CORREO, ADMIN_PASSWORD, "admin"))
+            cambios = True
+        if cambios:
+            self.gestor.guardar(usuarios)
+
+    def _leer(self) -> list:
+        try:
+            return self.gestor.leer()
+        except ErrorAlmacenamiento:
+            try:
+                self._asegurar_admin()  # restaura al Admin si el archivo se reinició
+            except ErrorAlmacenamiento:
+                pass
+            raise
+
+    # ---------- operaciones ----------
+    def listar(self) -> list:
+        return self._leer()
+
+    def buscar_por_correo(self, correo: str):
+        correo = self._normalizar(correo)
+        return next((u for u in self._leer() if u.get("correo") == correo), None)
+
+    def registrar(self, nombre: str, correo: str, password: str, rol: str = "vecino") -> dict:
+        if rol not in ROLES or rol == "admin":
+            raise ValueError("Rol no permitido en el registro.")
+        usuarios = self._leer()
+        if any(u.get("correo") == self._normalizar(correo) for u in usuarios):
+            raise UsuarioExistente(correo)
+        usuario = self._nuevo(nombre, correo, password, rol)
         usuarios.append(usuario)
-        self._guardar(usuarios)
+        self.gestor.guardar(usuarios)
         return usuario
 
+    def eliminar(self, uid: str):
+        """Elimina y devuelve el usuario, o None si no existe."""
+        usuarios = self._leer()
+        for i, u in enumerate(usuarios):
+            if u.get("id") == uid:
+                borrado = usuarios.pop(i)
+                self.gestor.guardar(usuarios)
+                return borrado
+        return None
+
     def validar_credenciales(self, correo: str, password: str):
-        """Devuelve el usuario si las credenciales son correctas, o None."""
         usuario = self.buscar_por_correo(correo)
         if not usuario:
             return None
@@ -112,5 +109,4 @@ class UsuariosModelo:
             calculado = self._hash(password, usuario["salt"])
         except (KeyError, ValueError):
             return None
-        esperado = usuario.get("password_hash", "")
-        return usuario if hmac.compare_digest(esperado, calculado) else None
+        return usuario if hmac.compare_digest(usuario.get("password_hash", ""), calculado) else None
